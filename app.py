@@ -58,21 +58,6 @@ INDEX_TEMPLATE = '''
       </div>
 
       <div class="row g-4">
-        <div class="col-lg-5">
-          <div class="card h-100">
-            <div class="card-header">Classificação Atual</div>
-            <div class="card-body p-0">
-              <table class="table mb-0 table-sm">
-                <thead><tr><th>#</th><th>Time</th></tr></thead>
-                <tbody>
-                  {% for team in standings %}
-                    <tr><td>{{ loop.index }}</td><td>{{ team }}</td></tr>
-                  {% endfor %}
-                </tbody>
-              </table>
-            </div>
-          </div>
-        </div>
         <div class="col-lg-7">
           <div class="card h-100">
             <div class="card-header">Ranking de Participantes</div>
@@ -82,6 +67,21 @@ INDEX_TEMPLATE = '''
                 <tbody>
                   {% for participant, score in participants %}
                     <tr><td>{{ loop.index }}</td><td>{{ participant }}</td><td>{{ score }}</td></tr>
+                  {% endfor %}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+        <div class="col-lg-5">
+          <div class="card h-100">
+            <div class="card-header">Classificação Atual</div>
+            <div class="card-body p-0">
+              <table class="table mb-0 table-sm">
+                <thead><tr><th>#</th><th>Time</th></tr></thead>
+                <tbody>
+                  {% for team in standings %}
+                    <tr><td>{{ loop.index }}</td><td>{{ team }}</td></tr>
                   {% endfor %}
                 </tbody>
               </table>
