@@ -1,0 +1,5 @@
+Flask
+PyYAML
+requests
+beautifulsoup4
+dotenv
