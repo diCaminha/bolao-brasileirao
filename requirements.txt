@@ -1,5 +1,9 @@
-Flask
-PyYAML
-requests
-beautifulsoup4
-dotenv
+Flask==3.0.2
+gunicorn==21.2.0          # servidor WSGI usado no Render
+PyYAML==6.0.1
+requests==2.32.2
+pandas==2.2.2
+lxml==5.2.1
+html5lib==1.1
+beautifulsoup4==4.12.3
+urllib3==2.2.1
