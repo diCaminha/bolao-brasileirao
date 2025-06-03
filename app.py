@@ -4,8 +4,10 @@ import requests
 import re
 import urllib3
 from bs4 import BeautifulSoup
-from flask import Flask, render_template_string, abort, url_for
+from flask import Flask, render_template_string, abort, url_for, request, redirect
 from typing import List, Dict
+from PIL import Image
+import pytesseract
 
 # ---------------------------------------------------
 # Configurações gerais
@@ -33,6 +35,10 @@ HEADERS = {
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 app = Flask(__name__)
+
+# If scraping fails, a standings list provided via image upload can be stored
+# here for later use.
+MANUAL_STANDINGS: List[str] | None = None
 
 # ---------------------------------------------------
 # Templates – estilo Material Design via Bootstrap 5 + Google Fonts
@@ -105,6 +111,32 @@ INDEX_TEMPLATE = '''
           </div>
         </div>
       </div>
+    </div>
+  </body>
+</html>
+'''
+
+UPLOAD_TEMPLATE = '''
+<!doctype html>
+<html lang="pt-br">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Enviar imagem da tabela</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+  </head>
+  <body class="bg-light">
+    <div class="container py-5">
+      <h1 class="mb-4">Upload da Tabela Atual</h1>
+      {% if error %}
+        <div class="alert alert-danger">{{ error }}</div>
+      {% endif %}
+      <form method="post" enctype="multipart/form-data">
+        <div class="mb-3">
+          <input type="file" class="form-control" name="image" accept="image/*" required>
+        </div>
+        <button class="btn btn-primary" type="submit">Enviar</button>
+      </form>
     </div>
   </body>
 </html>
@@ -215,6 +247,32 @@ def _parse_standings_html(html: str) -> List[str]:
     return teams
 
 
+def _parse_standings_image(file_obj) -> List[str]:
+    """Extract team names from a screenshot using OCR."""
+    try:
+        img = Image.open(file_obj)
+    except Exception:
+        return []
+    text = pytesseract.image_to_string(img, lang="por")
+    teams: List[str] = []
+    for line in text.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        m = re.match(r"^(\d{1,2})\s+(.+)$", line)
+        if not m:
+            continue
+        name = _extract_team_from_cell(line)
+        if name:
+            teams.append(name)
+        if len(teams) >= 20:
+            break
+    return teams
+
+
+def _fetch_standings_from_web() -> List[str] | None:
+
+  
 def get_real_standings() -> List[str]:
     """Obtém a classificação atual do Brasileirão.
 
@@ -236,8 +294,27 @@ def get_real_standings() -> List[str]:
         if len(teams) >= 18:
             return teams[:20]
         last_error = ValueError("menos de 18 clubes extraidos")
+    return None
 
-    abort(500, f"Erro ao obter classificação: {last_error}")
+
+def get_real_standings() -> List[str]:
+    """Obtém a classificação atual do Brasileirão.
+
+    Primeiro tenta as fontes web conhecidas.  Caso falhem, utiliza a tabela
+    carregada manualmente via upload (se existir).  Caso contrário, orienta o
+    usuário a enviar um print da tabela.
+    """
+    global MANUAL_STANDINGS
+
+    teams = _fetch_standings_from_web()
+    if teams:
+        MANUAL_STANDINGS = teams
+        return teams
+
+    if MANUAL_STANDINGS:
+        return MANUAL_STANDINGS
+
+    abort(503, "N\u00e3o foi poss\u00edvel obter a classifica\u00e7\u00e3o. Envie uma imagem em /upload")
 
 
 def calculate_scores(predictions: Dict[str, List[str]], real: List[str]) -> Dict[str, int]:
@@ -291,6 +368,21 @@ def comparativo():
     predictions = load_predictions()
     comp = build_comparativo(predictions, standings)
     return render_template_string(COMPARATIVE_TEMPLATE, comparativo=comp)
+
+
+@app.route("/upload", methods=["GET", "POST"])
+def upload():
+    global MANUAL_STANDINGS
+    if request.method == "POST":
+        file = request.files.get("image")
+        if not file:
+            return render_template_string(UPLOAD_TEMPLATE, error="Arquivo inv\u00e1lido")
+        teams = _parse_standings_image(file.stream)
+        if len(teams) >= 18:
+            MANUAL_STANDINGS = teams[:20]
+            return redirect(url_for("index"))
+        return render_template_string(UPLOAD_TEMPLATE, error="N\u00e3o foi poss\u00edvel extrair a tabela")
+    return render_template_string(UPLOAD_TEMPLATE, error=None)
 
 # ---------------------------------------------------
 # Execução
