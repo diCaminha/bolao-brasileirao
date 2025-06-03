@@ -271,6 +271,15 @@ def _parse_standings_image(file_obj) -> List[str]:
 
 
 def _fetch_standings_from_web() -> List[str] | None:
+
+  
+def get_real_standings() -> List[str]:
+    """Obtém a classificação atual do Brasileirão.
+
+    Tenta primeiro as URLs da CNN Brasil.  Caso nenhuma funcione, utiliza a
+    página do site GE Globo como fonte alternativa.  Lança um erro 500 se não
+    for possível extrair ao menos 18 clubes de nenhuma das fontes.
+    """
     urls = CNN_URLS + [GE_URL]
     last_error: Exception | None = None
     for url in urls:
