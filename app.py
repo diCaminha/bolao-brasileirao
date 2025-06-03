@@ -10,10 +10,26 @@ from typing import List, Dict
 # ---------------------------------------------------
 # Configurações gerais
 # ---------------------------------------------------
-CNN_URL = "https://www.cnnbrasil.com.br/esportes/futebol/tabela-do-brasileirao/"
+# Possible sources for the current standings.  The first URL is the one used in
+# the original version of the application.  If it fails (for instance because
+# the page was moved) we try the second CNN link and finally a table from
+# Globo's sports website.
+CNN_URLS = [
+    "https://www.cnnbrasil.com.br/esportes/futebol/tabela-do-brasileirao/",
+    "https://www.cnnbrasil.com.br/esportes/futebol/tabela-do-brasileirao-serie-a/",
+]
+GE_URL = "https://ge.globo.com/futebol/brasileirao/"
 PARTICIPANTS_FILE = "participantes.yml"
 PORT = 5000
-HEADERS = {"User-Agent": "Mozilla/5.0 (compatible; BrasileiraoBot/1.0)"}
+# Some websites refuse connections from uncommon user-agents.  Pretend to be a
+# regular browser to increase our chances of success.
+HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/124.0 Safari/537.36"
+    )
+}
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 app = Flask(__name__)
@@ -157,14 +173,13 @@ def _extract_team_from_cell(cell_text: str) -> str:
     return " ".join(core)
 
 
-def get_real_standings() -> List[str]:
-    try:
-        resp = requests.get(CNN_URL, headers=HEADERS, timeout=15, verify=False)
-        resp.raise_for_status()
-    except Exception as exc:
-        abort(500, f"Erro ao acessar CNN Brasil: {exc}")
+def _parse_standings_html(html: str) -> List[str]:
+    """Extracts the team names from an HTML page.
 
-    html = resp.text
+    The logic tries first with ``pandas.read_html`` and then falls back to
+    manual parsing with BeautifulSoup.  Returns a list of team names or an empty
+    list if nothing suitable is found.
+    """
     # Tentativa 1: pandas
     try:
         dfs = pd.read_html(html)
@@ -182,7 +197,7 @@ def get_real_standings() -> List[str]:
     soup = BeautifulSoup(html, "html.parser")
     table = soup.find("table")
     if not table:
-        abort(500, "Tabela não encontrada na CNN.")
+        return []
     teams = []
     for row in table.find_all("tr"):
         cells = row.find_all("td")
@@ -197,9 +212,32 @@ def get_real_standings() -> List[str]:
             teams.append(name)
         if len(teams) >= 20:
             break
-    if len(teams) < 18:
-        abort(500, "Não foi possível extrair 18 clubes da CNN.")
     return teams
+
+
+def get_real_standings() -> List[str]:
+    """Obtém a classificação atual do Brasileirão.
+
+    Tenta primeiro as URLs da CNN Brasil.  Caso nenhuma funcione, utiliza a
+    página do site GE Globo como fonte alternativa.  Lança um erro 500 se não
+    for possível extrair ao menos 18 clubes de nenhuma das fontes.
+    """
+    urls = CNN_URLS + [GE_URL]
+    last_error: Exception | None = None
+    for url in urls:
+        try:
+            resp = requests.get(url, headers=HEADERS, timeout=15, verify=False)
+            resp.raise_for_status()
+        except Exception as exc:
+            last_error = exc
+            continue
+
+        teams = _parse_standings_html(resp.text)
+        if len(teams) >= 18:
+            return teams[:20]
+        last_error = ValueError("menos de 18 clubes extraidos")
+
+    abort(500, f"Erro ao obter classificação: {last_error}")
 
 
 def calculate_scores(predictions: Dict[str, List[str]], real: List[str]) -> Dict[str, int]:
