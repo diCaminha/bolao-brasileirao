@@ -4,19 +4,41 @@ import requests
 import re
 import urllib3
 from bs4 import BeautifulSoup
-from flask import Flask, render_template_string, abort, url_for
+from flask import Flask, render_template_string, abort, url_for, request, redirect
 from typing import List, Dict
+from PIL import Image
+import pytesseract
 
 # ---------------------------------------------------
 # Configurações gerais
 # ---------------------------------------------------
-CNN_URL = "https://www.cnnbrasil.com.br/esportes/futebol/tabela-do-brasileirao/"
+# Possible sources for the current standings.  The first URL is the one used in
+# the original version of the application.  If it fails (for instance because
+# the page was moved) we try the second CNN link and finally a table from
+# Globo's sports website.
+CNN_URLS = [
+    "https://www.cnnbrasil.com.br/esportes/futebol/tabela-do-brasileirao/",
+    "https://www.cnnbrasil.com.br/esportes/futebol/tabela-do-brasileirao-serie-a/",
+]
+GE_URL = "https://ge.globo.com/futebol/brasileirao/"
 PARTICIPANTS_FILE = "participantes.yml"
 PORT = 5000
-HEADERS = {"User-Agent": "Mozilla/5.0 (compatible; BrasileiraoBot/1.0)"}
+# Some websites refuse connections from uncommon user-agents.  Pretend to be a
+# regular browser to increase our chances of success.
+HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/124.0 Safari/537.36"
+    )
+}
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 app = Flask(__name__)
+
+# If scraping fails, a standings list provided via image upload can be stored
+# here for later use.
+MANUAL_STANDINGS: List[str] | None = None
 
 # ---------------------------------------------------
 # Templates – estilo Material Design via Bootstrap 5 + Google Fonts
@@ -94,6 +116,32 @@ INDEX_TEMPLATE = '''
 </html>
 '''
 
+UPLOAD_TEMPLATE = '''
+<!doctype html>
+<html lang="pt-br">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Enviar imagem da tabela</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+  </head>
+  <body class="bg-light">
+    <div class="container py-5">
+      <h1 class="mb-4">Upload da Tabela Atual</h1>
+      {% if error %}
+        <div class="alert alert-danger">{{ error }}</div>
+      {% endif %}
+      <form method="post" enctype="multipart/form-data">
+        <div class="mb-3">
+          <input type="file" class="form-control" name="image" accept="image/*" required>
+        </div>
+        <button class="btn btn-primary" type="submit">Enviar</button>
+      </form>
+    </div>
+  </body>
+</html>
+'''
+
 COMPARATIVE_TEMPLATE = '''
 <!doctype html>
 <html lang="pt-br">
@@ -157,14 +205,13 @@ def _extract_team_from_cell(cell_text: str) -> str:
     return " ".join(core)
 
 
-def get_real_standings() -> List[str]:
-    try:
-        resp = requests.get(CNN_URL, headers=HEADERS, timeout=15, verify=False)
-        resp.raise_for_status()
-    except Exception as exc:
-        abort(500, f"Erro ao acessar CNN Brasil: {exc}")
+def _parse_standings_html(html: str) -> List[str]:
+    """Extracts the team names from an HTML page.
 
-    html = resp.text
+    The logic tries first with ``pandas.read_html`` and then falls back to
+    manual parsing with BeautifulSoup.  Returns a list of team names or an empty
+    list if nothing suitable is found.
+    """
     # Tentativa 1: pandas
     try:
         dfs = pd.read_html(html)
@@ -182,7 +229,7 @@ def get_real_standings() -> List[str]:
     soup = BeautifulSoup(html, "html.parser")
     table = soup.find("table")
     if not table:
-        abort(500, "Tabela não encontrada na CNN.")
+        return []
     teams = []
     for row in table.find_all("tr"):
         cells = row.find_all("td")
@@ -197,9 +244,68 @@ def get_real_standings() -> List[str]:
             teams.append(name)
         if len(teams) >= 20:
             break
-    if len(teams) < 18:
-        abort(500, "Não foi possível extrair 18 clubes da CNN.")
     return teams
+
+
+def _parse_standings_image(file_obj) -> List[str]:
+    """Extract team names from a screenshot using OCR."""
+    try:
+        img = Image.open(file_obj)
+    except Exception:
+        return []
+    text = pytesseract.image_to_string(img, lang="por")
+    teams: List[str] = []
+    for line in text.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        m = re.match(r"^(\d{1,2})\s+(.+)$", line)
+        if not m:
+            continue
+        name = _extract_team_from_cell(line)
+        if name:
+            teams.append(name)
+        if len(teams) >= 20:
+            break
+    return teams
+
+
+def _fetch_standings_from_web() -> List[str] | None:
+    urls = CNN_URLS + [GE_URL]
+    last_error: Exception | None = None
+    for url in urls:
+        try:
+            resp = requests.get(url, headers=HEADERS, timeout=15, verify=False)
+            resp.raise_for_status()
+        except Exception as exc:
+            last_error = exc
+            continue
+
+        teams = _parse_standings_html(resp.text)
+        if len(teams) >= 18:
+            return teams[:20]
+        last_error = ValueError("menos de 18 clubes extraidos")
+    return None
+
+
+def get_real_standings() -> List[str]:
+    """Obtém a classificação atual do Brasileirão.
+
+    Primeiro tenta as fontes web conhecidas.  Caso falhem, utiliza a tabela
+    carregada manualmente via upload (se existir).  Caso contrário, orienta o
+    usuário a enviar um print da tabela.
+    """
+    global MANUAL_STANDINGS
+
+    teams = _fetch_standings_from_web()
+    if teams:
+        MANUAL_STANDINGS = teams
+        return teams
+
+    if MANUAL_STANDINGS:
+        return MANUAL_STANDINGS
+
+    abort(503, "N\u00e3o foi poss\u00edvel obter a classifica\u00e7\u00e3o. Envie uma imagem em /upload")
 
 
 def calculate_scores(predictions: Dict[str, List[str]], real: List[str]) -> Dict[str, int]:
@@ -253,6 +359,21 @@ def comparativo():
     predictions = load_predictions()
     comp = build_comparativo(predictions, standings)
     return render_template_string(COMPARATIVE_TEMPLATE, comparativo=comp)
+
+
+@app.route("/upload", methods=["GET", "POST"])
+def upload():
+    global MANUAL_STANDINGS
+    if request.method == "POST":
+        file = request.files.get("image")
+        if not file:
+            return render_template_string(UPLOAD_TEMPLATE, error="Arquivo inv\u00e1lido")
+        teams = _parse_standings_image(file.stream)
+        if len(teams) >= 18:
+            MANUAL_STANDINGS = teams[:20]
+            return redirect(url_for("index"))
+        return render_template_string(UPLOAD_TEMPLATE, error="N\u00e3o foi poss\u00edvel extrair a tabela")
+    return render_template_string(UPLOAD_TEMPLATE, error=None)
 
 # ---------------------------------------------------
 # Execução
